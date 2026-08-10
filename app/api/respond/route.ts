@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-const MODEL = process.env.HF_MODEL || "Qwen/Qwen2.5-7B-Instruct-1M:fastest";
+const MODEL = process.env.HF_MODEL || "Qwen/Qwen2.5-7B-Instruct-1M";
 const HF_URL = "https://router.huggingface.co/v1/chat/completions";
 
 type Agent = { name: string; role: string; perspective: string; tone: string };
