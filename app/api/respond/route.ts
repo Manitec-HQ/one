@@ -7,22 +7,37 @@ type Agent = { name: string; role: string; perspective: string; tone: string };
 type Perspective = { who: string; text: string };
 type AskResult = { text: string | null; diagnostic: string };
 
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function ask(system: string, user: string): Promise<AskResult> {
   const token = process.env.HF_TOKEN;
   if (!token) return { text: null, diagnostic: "token not configured" };
-  try {
-    const response = await fetch(HF_URL, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model: MODEL, messages: [{ role: "system", content: system }, { role: "user", content: user }], max_tokens: 220, temperature: 0.7 }),
-    });
-    if (!response.ok) return { text: null, diagnostic: `provider HTTP ${response.status}` };
-    const data = await response.json();
-    const text = data?.choices?.[0]?.message?.content?.trim() || null;
-    return { text, diagnostic: text ? "live" : "empty provider response" };
-  } catch {
-    return { text: null, diagnostic: "provider network error" };
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const response = await fetch(HF_URL, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model: MODEL, messages: [{ role: "system", content: system }, { role: "user", content: user }], max_tokens: 220, temperature: 0.7 }),
+      });
+      if (response.ok) {
+        const data = await response.json();
+        const text = data?.choices?.[0]?.message?.content?.trim() || null;
+        return { text, diagnostic: text ? "live" : "empty provider response" };
+      }
+      if (response.status === 503 && attempt === 0) {
+        await delay(750 + Math.floor(Math.random() * 250));
+        continue;
+      }
+      return { text: null, diagnostic: response.status === 503 ? "provider HTTP 503 after retry" : `provider HTTP ${response.status}` };
+    } catch {
+      return { text: null, diagnostic: "provider network error" };
+    }
   }
+
+  return { text: null, diagnostic: "provider HTTP 503 after retry" };
 }
 
 function isCasual(message: string) {
