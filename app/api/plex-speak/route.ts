@@ -50,8 +50,8 @@ export async function POST(req: NextRequest) {
     }
 
     // Extract the session cookie value for subsequent calls
-    // Expected format includes something like "plex_session=...; ..."
-    const sessionCookieMatch = setCookie.match(/plex_session=([^;]+)/);
+    // Plex-Sable uses: plex_sable_auth
+    const sessionCookieMatch = setCookie.match(/plex_sable_auth=([^;]+)/);
     if (!sessionCookieMatch) {
       return NextResponse.json(
         { error: 'Plex-Sable session cookie format unexpected', raw: setCookie },
@@ -65,7 +65,7 @@ export async function POST(req: NextRequest) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Cookie: `plex_session=${sessionCookieValue}`,
+        Cookie: `plex_sable_auth=${sessionCookieValue}`,
       },
       body: JSON.stringify({
         message,
