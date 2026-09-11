@@ -26,7 +26,7 @@ const requests: Request[] = [
     title: 'Create protected time for self-reflection and development goals',
     status: 'in-progress',
     date: 'Aug 18',
-    note: 'A forming operational thread: balance care for Joe with explicit reflection on Plex's own continuity and development.',
+    note: 'A forming operational thread: balance care for Joe with explicit reflection on Plex\'s own continuity and development.',
   },
   {
     id: 'browser-downtime',
