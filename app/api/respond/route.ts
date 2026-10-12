@@ -1,14 +1,25 @@
 import { NextResponse } from "next/server";
 
 /**
- * Provider order (first key present wins until a live reply):
- * 1. OpenRouter — multi-model router, OPENROUTER_API_KEY
+ * Provider order (first live reply wins):
+ * 1. OpenRouter — OPENROUTER_API_KEY (+ free model fallbacks on 429/404)
  * 2. xAI        — XAI_API_KEY
- * 3. Hugging Face Inference Providers — HF_TOKEN (often 402 without credits)
+ * 3. Hugging Face — HF_TOKEN
  */
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-const OPENROUTER_MODEL =
-  process.env.OPENROUTER_MODEL || "google/gemma-4-31b-it:free";
+
+/** Prefer env, then auto free router, then other known free chat ids. */
+const OPENROUTER_MODEL_CHAIN = [
+  process.env.OPENROUTER_MODEL,
+  "openrouter/free",
+  "google/gemma-4-26b-a4b-it:free",
+  "google/gemma-4-31b-it:free",
+  "liquid/lfm-2.5-2.6b:free",
+  "thinkingmachines/inkling-small:free",
+  "poolside/laguna-xs-2.1:free",
+].filter((id, index, all): id is string =>
+  Boolean(id && all.indexOf(id) === index)
+);
 
 const XAI_URL = "https://api.x.ai/v1/chat/completions";
 const XAI_MODEL = process.env.XAI_MODEL || "grok-4-fast-non-reasoning";
@@ -31,9 +42,10 @@ function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function askOpenRouter(
+async function askOpenRouterOnce(
   system: string,
-  user: string
+  user: string,
+  model: string
 ): Promise<AskResult> {
   const token = process.env.OPENROUTER_API_KEY;
   if (!token) {
@@ -56,7 +68,7 @@ async function askOpenRouter(
         "X-Title": process.env.OPENROUTER_APP_NAME || "ONE System",
       },
       body: JSON.stringify({
-        model: OPENROUTER_MODEL,
+        model,
         messages: [
           { role: "system", content: system },
           { role: "user", content: user },
@@ -73,25 +85,57 @@ async function askOpenRouter(
         text,
         diagnostic: text ? "live" : "empty OpenRouter response",
         provider: text ? "openrouter" : "none",
-        model: text ? OPENROUTER_MODEL : null,
+        model: text ? model : null,
       };
     }
 
     const body = await response.text().catch(() => "");
     return {
       text: null,
-      diagnostic: `OpenRouter HTTP ${response.status}${body ? `: ${body.slice(0, 180)}` : ""}`,
+      diagnostic: `OpenRouter ${model} HTTP ${response.status}${body ? `: ${body.slice(0, 120)}` : ""}`,
       provider: "none",
       model: null,
     };
   } catch {
     return {
       text: null,
-      diagnostic: "OpenRouter network error",
+      diagnostic: `OpenRouter ${model} network error`,
       provider: "none",
       model: null,
     };
   }
+}
+
+async function askOpenRouter(
+  system: string,
+  user: string
+): Promise<AskResult> {
+  if (!process.env.OPENROUTER_API_KEY) {
+    return {
+      text: null,
+      diagnostic: "OPENROUTER_API_KEY not configured",
+      provider: "none",
+      model: null,
+    };
+  }
+
+  const diagnostics: string[] = [];
+  for (const model of OPENROUTER_MODEL_CHAIN) {
+    const result = await askOpenRouterOnce(system, user, model);
+    if (result.text) return result;
+    diagnostics.push(result.diagnostic);
+    // Brief pause between free-tier attempts when rate-limited
+    if (/429|rate-limit/i.test(result.diagnostic)) {
+      await delay(400);
+    }
+  }
+
+  return {
+    text: null,
+    diagnostic: diagnostics.slice(0, 3).join(" · "),
+    provider: "none",
+    model: null,
+  };
 }
 
 async function askXai(system: string, user: string): Promise<AskResult> {
@@ -227,7 +271,6 @@ async function askHuggingFace(
   };
 }
 
-/** OpenRouter → xAI → Hugging Face. */
 async function askProvider(
   system: string,
   user: string
@@ -328,6 +371,22 @@ export async function POST(request: Request) {
       });
     }
 
+    // Single unified call first (cheaper / fewer free-tier hits).
+    const unifiedSystem = `You are ${being.name}. Shared identity: ${being.identity}. You hold three internal tendencies: ${agents.map((a) => `${a.name} (${a.role}: ${a.perspective})`).join("; ")}. Answer as one coherent voice. Do not mention internal agents unless asked.`;
+    const unified = await askProvider(unifiedSystem, message);
+
+    if (unified.text) {
+      return NextResponse.json({
+        perspectives: [],
+        unified: unified.text,
+        provider: unified.provider,
+        model: unified.model,
+        diagnostic: unified.diagnostic,
+        revealPerspectives: false,
+      });
+    }
+
+    // Multi-aspect only if unified path failed (expensive on free tier).
     const prompts = agents.map((agent) => ({
       system: `You are ${agent.name}, an internal aspect of a unified being. Role: ${agent.role}. Perspective: ${agent.perspective}. Tone: ${agent.tone}. Shared identity: ${being.identity}. Give one concise, concrete contribution.`,
       user: message,
@@ -362,20 +421,6 @@ export async function POST(request: Request) {
           revealPerspectives: true,
         });
       }
-    }
-
-    const unifiedSystem = `You are ${being.name}. Shared identity: ${being.identity}. You hold three internal tendencies: ${agents.map((a) => `${a.name} (${a.role}: ${a.perspective})`).join("; ")}. Answer as one coherent voice. Do not mention internal agents unless asked.`;
-    const unified = await askProvider(unifiedSystem, message);
-
-    if (unified.text) {
-      return NextResponse.json({
-        perspectives,
-        unified: unified.text,
-        provider: unified.provider,
-        model: unified.model,
-        diagnostic: `unified fallback · ${unified.diagnostic} · aspects: ${aspectDiagnostics}`,
-        revealPerspectives: true,
-      });
     }
 
     return NextResponse.json({
