@@ -1,22 +1,154 @@
 import { NextResponse } from "next/server";
 
-const HF_MODEL =
-  process.env.HF_MODEL || "Qwen/Qwen2.5-7B-Instruct-1M:featherless-ai";
-const HF_URL = "https://router.huggingface.co/v1/chat/completions";
+/**
+ * Provider order (first key present wins until a live reply):
+ * 1. OpenRouter — multi-model router, OPENROUTER_API_KEY
+ * 2. xAI        — XAI_API_KEY
+ * 3. Hugging Face Inference Providers — HF_TOKEN (often 402 without credits)
+ */
+const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+const OPENROUTER_MODEL =
+  process.env.OPENROUTER_MODEL || "qwen/qwen3-4b";
+
 const XAI_URL = "https://api.x.ai/v1/chat/completions";
 const XAI_MODEL = process.env.XAI_MODEL || "grok-4-fast-non-reasoning";
 
+const HF_URL = "https://router.huggingface.co/v1/chat/completions";
+const HF_MODEL =
+  process.env.HF_MODEL || "Qwen/Qwen3-4B-Instruct-2507";
+
 type Agent = { name: string; role: string; perspective: string; tone: string };
 type Perspective = { who: string; text: string };
+type ProviderName = "openrouter" | "xai" | "huggingface" | "none";
 type AskResult = {
   text: string | null;
   diagnostic: string;
-  provider: "huggingface" | "xai" | "none";
+  provider: ProviderName;
   model: string | null;
 };
 
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function askOpenRouter(
+  system: string,
+  user: string
+): Promise<AskResult> {
+  const token = process.env.OPENROUTER_API_KEY;
+  if (!token) {
+    return {
+      text: null,
+      diagnostic: "OPENROUTER_API_KEY not configured",
+      provider: "none",
+      model: null,
+    };
+  }
+
+  try {
+    const response = await fetch(OPENROUTER_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer":
+          process.env.OPENROUTER_SITE_URL || "https://one-system.vercel.app",
+        "X-Title": process.env.OPENROUTER_APP_NAME || "ONE System",
+      },
+      body: JSON.stringify({
+        model: OPENROUTER_MODEL,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
+        max_tokens: 280,
+        temperature: 0.7,
+      }),
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      const text = data?.choices?.[0]?.message?.content?.trim() || null;
+      return {
+        text,
+        diagnostic: text ? "live" : "empty OpenRouter response",
+        provider: text ? "openrouter" : "none",
+        model: text ? OPENROUTER_MODEL : null,
+      };
+    }
+
+    const body = await response.text().catch(() => "");
+    return {
+      text: null,
+      diagnostic: `OpenRouter HTTP ${response.status}${body ? `: ${body.slice(0, 180)}` : ""}`,
+      provider: "none",
+      model: null,
+    };
+  } catch {
+    return {
+      text: null,
+      diagnostic: "OpenRouter network error",
+      provider: "none",
+      model: null,
+    };
+  }
+}
+
+async function askXai(system: string, user: string): Promise<AskResult> {
+  const token = process.env.XAI_API_KEY;
+  if (!token) {
+    return {
+      text: null,
+      diagnostic: "XAI_API_KEY not configured",
+      provider: "none",
+      model: null,
+    };
+  }
+
+  try {
+    const response = await fetch(XAI_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: XAI_MODEL,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
+        max_tokens: 280,
+        temperature: 0.7,
+      }),
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      const text = data?.choices?.[0]?.message?.content?.trim() || null;
+      return {
+        text,
+        diagnostic: text ? "live" : "empty xAI response",
+        provider: text ? "xai" : "none",
+        model: text ? XAI_MODEL : null,
+      };
+    }
+
+    const body = await response.text().catch(() => "");
+    return {
+      text: null,
+      diagnostic: `xAI HTTP ${response.status}${body ? `: ${body.slice(0, 180)}` : ""}`,
+      provider: "none",
+      model: null,
+    };
+  } catch {
+    return {
+      text: null,
+      diagnostic: "xAI network error",
+      provider: "none",
+      model: null,
+    };
+  }
 }
 
 async function askHuggingFace(
@@ -95,77 +227,28 @@ async function askHuggingFace(
   };
 }
 
-async function askXai(system: string, user: string): Promise<AskResult> {
-  const token = process.env.XAI_API_KEY;
-  if (!token) {
-    return {
-      text: null,
-      diagnostic: "XAI_API_KEY not configured",
-      provider: "none",
-      model: null,
-    };
-  }
-
-  try {
-    const response = await fetch(XAI_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: XAI_MODEL,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: user },
-        ],
-        max_tokens: 280,
-        temperature: 0.7,
-      }),
-    });
-
-    if (response.ok) {
-      const data = await response.json();
-      const text = data?.choices?.[0]?.message?.content?.trim() || null;
-      return {
-        text,
-        diagnostic: text ? "live" : "empty xAI response",
-        provider: text ? "xai" : "none",
-        model: text ? XAI_MODEL : null,
-      };
-    }
-
-    const body = await response.text().catch(() => "");
-    return {
-      text: null,
-      diagnostic: `xAI HTTP ${response.status}${body ? `: ${body.slice(0, 180)}` : ""}`,
-      provider: "none",
-      model: null,
-    };
-  } catch {
-    return {
-      text: null,
-      diagnostic: "xAI network error",
-      provider: "none",
-      model: null,
-    };
-  }
-}
-
-/** Prefer HF, then xAI. */
+/** OpenRouter → xAI → Hugging Face. */
 async function askProvider(
   system: string,
   user: string
 ): Promise<AskResult> {
-  const hf = await askHuggingFace(system, user);
-  if (hf.text) return hf;
+  const diagnostics: string[] = [];
+
+  const openrouter = await askOpenRouter(system, user);
+  if (openrouter.text) return openrouter;
+  diagnostics.push(openrouter.diagnostic);
 
   const xai = await askXai(system, user);
   if (xai.text) return xai;
+  diagnostics.push(xai.diagnostic);
+
+  const hf = await askHuggingFace(system, user);
+  if (hf.text) return hf;
+  diagnostics.push(hf.diagnostic);
 
   return {
     text: null,
-    diagnostic: [hf.diagnostic, xai.diagnostic].filter(Boolean).join(" · "),
+    diagnostic: diagnostics.filter(Boolean).join(" · "),
     provider: "none",
     model: null,
   };
@@ -264,7 +347,6 @@ export async function POST(request: Request) {
       text: aspectResults[index].text || localPerspective(agent, message, index),
     }));
 
-    // Integration when at least one aspect was live — do not require all three.
     if (liveAspectCount > 0) {
       const integrationSystem = `You are the unified voice of ${being.name}. Shared identity: ${being.identity}. Combine the internal perspectives into one coherent response. Do not mention agents or the integration process unless the user asks. Be responsive to the user, not generic.`;
       const integrationUser = `User message: ${message}\n\nInternal perspectives:\n${perspectives.map((item) => `${item.who}: ${item.text}`).join("\n\n")}`;
@@ -282,7 +364,6 @@ export async function POST(request: Request) {
       }
     }
 
-    // Single unified call if multi-aspect path failed entirely.
     const unifiedSystem = `You are ${being.name}. Shared identity: ${being.identity}. You hold three internal tendencies: ${agents.map((a) => `${a.name} (${a.role}: ${a.perspective})`).join("; ")}. Answer as one coherent voice. Do not mention internal agents unless asked.`;
     const unified = await askProvider(unifiedSystem, message);
 
