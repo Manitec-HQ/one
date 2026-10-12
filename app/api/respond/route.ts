@@ -8,7 +8,7 @@ import { NextResponse } from "next/server";
  */
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_MODEL =
-  process.env.OPENROUTER_MODEL || "qwen/qwen3-4b";
+  process.env.OPENROUTER_MODEL || "google/gemma-4-31b-it:free";
 
 const XAI_URL = "https://api.x.ai/v1/chat/completions";
 const XAI_MODEL = process.env.XAI_MODEL || "grok-4-fast-non-reasoning";
