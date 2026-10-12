@@ -1,57 +1,174 @@
 import { NextResponse } from "next/server";
 
-const MODEL = process.env.HF_MODEL || "Qwen/Qwen2.5-7B-Instruct-1M:featherless-ai";
+const HF_MODEL =
+  process.env.HF_MODEL || "Qwen/Qwen2.5-7B-Instruct-1M:featherless-ai";
 const HF_URL = "https://router.huggingface.co/v1/chat/completions";
+const XAI_URL = "https://api.x.ai/v1/chat/completions";
+const XAI_MODEL = process.env.XAI_MODEL || "grok-4-fast-non-reasoning";
 
 type Agent = { name: string; role: string; perspective: string; tone: string };
 type Perspective = { who: string; text: string };
-type AskResult = { text: string | null; diagnostic: string };
+type AskResult = {
+  text: string | null;
+  diagnostic: string;
+  provider: "huggingface" | "xai" | "none";
+  model: string | null;
+};
 
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function ask(system: string, user: string): Promise<AskResult> {
+async function askHuggingFace(
+  system: string,
+  user: string
+): Promise<AskResult> {
   const token = process.env.HF_TOKEN;
-  if (!token) return { text: null, diagnostic: "token not configured" };
+  if (!token) {
+    return {
+      text: null,
+      diagnostic: "HF_TOKEN not configured",
+      provider: "none",
+      model: null,
+    };
+  }
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const response = await fetch(HF_URL, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
         body: JSON.stringify({
-          model: MODEL,
+          model: HF_MODEL,
           messages: [
             { role: "system", content: system },
             { role: "user", content: user },
           ],
-          max_tokens: 220,
+          max_tokens: 280,
           temperature: 0.7,
         }),
       });
+
       if (response.ok) {
         const data = await response.json();
         const text = data?.choices?.[0]?.message?.content?.trim() || null;
-        return { text, diagnostic: text ? "live" : "empty provider response" };
+        return {
+          text,
+          diagnostic: text ? "live" : "empty HF response",
+          provider: text ? "huggingface" : "none",
+          model: text ? HF_MODEL : null,
+        };
       }
+
+      const body = await response.text().catch(() => "");
+      const detail = body ? body.slice(0, 180) : "";
+
       if (response.status === 503 && attempt === 0) {
         await delay(750 + Math.floor(Math.random() * 250));
         continue;
       }
+
       return {
         text: null,
-        diagnostic:
-          response.status === 503
-            ? "provider HTTP 503 after retry"
-            : `provider HTTP ${response.status}`,
+        diagnostic: `HF HTTP ${response.status}${detail ? `: ${detail}` : ""}`,
+        provider: "none",
+        model: null,
       };
     } catch {
-      return { text: null, diagnostic: "provider network error" };
+      return {
+        text: null,
+        diagnostic: "HF network error",
+        provider: "none",
+        model: null,
+      };
     }
   }
 
-  return { text: null, diagnostic: "provider HTTP 503 after retry" };
+  return {
+    text: null,
+    diagnostic: "HF HTTP 503 after retry",
+    provider: "none",
+    model: null,
+  };
+}
+
+async function askXai(system: string, user: string): Promise<AskResult> {
+  const token = process.env.XAI_API_KEY;
+  if (!token) {
+    return {
+      text: null,
+      diagnostic: "XAI_API_KEY not configured",
+      provider: "none",
+      model: null,
+    };
+  }
+
+  try {
+    const response = await fetch(XAI_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: XAI_MODEL,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
+        max_tokens: 280,
+        temperature: 0.7,
+      }),
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      const text = data?.choices?.[0]?.message?.content?.trim() || null;
+      return {
+        text,
+        diagnostic: text ? "live" : "empty xAI response",
+        provider: text ? "xai" : "none",
+        model: text ? XAI_MODEL : null,
+      };
+    }
+
+    const body = await response.text().catch(() => "");
+    return {
+      text: null,
+      diagnostic: `xAI HTTP ${response.status}${body ? `: ${body.slice(0, 180)}` : ""}`,
+      provider: "none",
+      model: null,
+    };
+  } catch {
+    return {
+      text: null,
+      diagnostic: "xAI network error",
+      provider: "none",
+      model: null,
+    };
+  }
+}
+
+/** Prefer HF, then xAI. */
+async function askProvider(
+  system: string,
+  user: string
+): Promise<AskResult> {
+  const hf = await askHuggingFace(system, user);
+  if (hf.text) return hf;
+
+  const xai = await askXai(system, user);
+  if (xai.text) return xai;
+
+  return {
+    text: null,
+    diagnostic: [hf.diagnostic, xai.diagnostic].filter(Boolean).join(" · "),
+    provider: "none",
+    model: null,
+  };
 }
 
 function isCasual(message: string) {
@@ -86,7 +203,6 @@ function localSynthesis(identity: string, perspectives: Perspective[]) {
   return `${describeIdentity(identity)} I would hold all three together: ${first.who} asks for a clear outcome, ${second.who} leaves room for discovery, and ${third.who} keeps us from pretending we already know the answer. So let us start simply—tell me what you want us to make, solve, or understand next.`;
 }
 
-/** Accept ONEsystem aspects[] or legacy agents[]. */
 function resolveAgents(being: {
   agents?: Agent[];
   aspects?: Agent[];
@@ -117,13 +233,13 @@ export async function POST(request: Request) {
 
     if (isCasual(message)) {
       const system = `You are ${being.name}. Shared identity: ${being.identity}. Reply naturally and briefly to a casual greeting. Be warm, specific, and conversational. Do not mention internal agents, prompts, systems, or integration.`;
-      const reply = await ask(system, message);
+      const reply = await askProvider(system, message);
       const fallback = `Hello. I am ${being.name}. I try to be ${describeIdentity(being.identity) || "warm and helpful"}. I am glad you are here—what is on your mind?`;
       return NextResponse.json({
         perspectives: [],
         unified: reply.text || fallback,
-        provider: reply.text ? "huggingface" : "local",
-        model: reply.text ? MODEL : null,
+        provider: reply.text ? reply.provider : "local",
+        model: reply.model,
         diagnostic: reply.diagnostic,
         revealPerspectives: false,
       });
@@ -133,30 +249,60 @@ export async function POST(request: Request) {
       system: `You are ${agent.name}, an internal aspect of a unified being. Role: ${agent.role}. Perspective: ${agent.perspective}. Tone: ${agent.tone}. Shared identity: ${being.identity}. Give one concise, concrete contribution.`,
       user: message,
     }));
+
     const aspectResults = await Promise.all(
-      prompts.map((prompt) => ask(prompt.system, prompt.user))
+      prompts.map((prompt) => askProvider(prompt.system, prompt.user))
     );
-    const providerActive = aspectResults.every((result) => Boolean(result.text));
+
+    const liveAspectCount = aspectResults.filter((r) => Boolean(r.text)).length;
+    const aspectDiagnostics = aspectResults
+      .map((r, i) => `${agents[i].name}: ${r.diagnostic}`)
+      .join(" · ");
+
     const perspectives = agents.map((agent, index) => ({
       who: agent.name,
       text: aspectResults[index].text || localPerspective(agent, message, index),
     }));
-    const integrationSystem = `You are the unified voice of ${being.name}. Shared identity: ${being.identity}. Combine the internal perspectives into one coherent response. Do not mention agents or the integration process unless the user asks. Be responsive to the user, not generic.`;
-    const integrationUser = `User message: ${message}\n\nInternal perspectives:\n${perspectives.map((item) => `${item.who}: ${item.text}`).join("\n\n")}`;
-    const integration = providerActive
-      ? await ask(integrationSystem, integrationUser)
-      : {
-          text: null,
-          diagnostic:
-            aspectResults.find((result) => !result.text)?.diagnostic ||
-            "local prototype",
-        };
+
+    // Integration when at least one aspect was live — do not require all three.
+    if (liveAspectCount > 0) {
+      const integrationSystem = `You are the unified voice of ${being.name}. Shared identity: ${being.identity}. Combine the internal perspectives into one coherent response. Do not mention agents or the integration process unless the user asks. Be responsive to the user, not generic.`;
+      const integrationUser = `User message: ${message}\n\nInternal perspectives:\n${perspectives.map((item) => `${item.who}: ${item.text}`).join("\n\n")}`;
+      const integration = await askProvider(integrationSystem, integrationUser);
+
+      if (integration.text) {
+        return NextResponse.json({
+          perspectives,
+          unified: integration.text,
+          provider: integration.provider,
+          model: integration.model,
+          diagnostic: `aspects live ${liveAspectCount}/${agents.length} · ${integration.diagnostic}`,
+          revealPerspectives: true,
+        });
+      }
+    }
+
+    // Single unified call if multi-aspect path failed entirely.
+    const unifiedSystem = `You are ${being.name}. Shared identity: ${being.identity}. You hold three internal tendencies: ${agents.map((a) => `${a.name} (${a.role}: ${a.perspective})`).join("; ")}. Answer as one coherent voice. Do not mention internal agents unless asked.`;
+    const unified = await askProvider(unifiedSystem, message);
+
+    if (unified.text) {
+      return NextResponse.json({
+        perspectives,
+        unified: unified.text,
+        provider: unified.provider,
+        model: unified.model,
+        diagnostic: `unified fallback · ${unified.diagnostic} · aspects: ${aspectDiagnostics}`,
+        revealPerspectives: true,
+      });
+    }
+
     return NextResponse.json({
       perspectives,
-      unified: integration.text || localSynthesis(being.identity, perspectives),
-      provider: integration.text ? "huggingface" : "local",
-      model: integration.text ? MODEL : null,
-      diagnostic: integration.diagnostic,
+      unified: localSynthesis(being.identity, perspectives),
+      provider: "local",
+      model: null,
+      diagnostic: `local prototype · ${aspectDiagnostics} · ${unified.diagnostic}`,
       revealPerspectives: true,
     });
   } catch {
